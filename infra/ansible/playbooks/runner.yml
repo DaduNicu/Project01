@@ -1,0 +1,146 @@
+---
+- name: Setup CI runner with required tools
+  hosts: runner
+  become: yes
+  
+  vars:
+    kubectl_version: "1.28.0"
+    helm_version: "3.13.0"
+    terraform_version: "1.6.0"
+    runner_version: "2.311.0"
+    github_repo: "{{ lookup('env', 'GITHUB_REPOSITORY') }}"
+    github_token: "{{ lookup('env', 'GITHUB_TOKEN') }}"
+    
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Install base packages
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - unzip
+          - jq
+          - ca-certificates
+          - gnupg
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Add Docker repo
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Start Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Install kubectl
+      get_url:
+        url: "https://dl.k8s.io/release/v{{ kubectl_version }}/bin/linux/amd64/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+
+    - name: Install Helm
+      unarchive:
+        src: "https://get.helm.sh/helm-v{{ helm_version }}-linux-amd64.tar.gz"
+        dest: /tmp
+        remote_src: yes
+      register: helm_download
+
+    - name: Move Helm binary
+      copy:
+        src: /tmp/linux-amd64/helm
+        dest: /usr/local/bin/helm
+        mode: '0755'
+        remote_src: yes
+      when: helm_download.changed
+
+    - name: Install Terraform
+      unarchive:
+        src: "https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_linux_amd64.zip"
+        dest: /usr/local/bin
+        remote_src: yes
+        mode: '0755'
+
+    - name: Install gcloud SDK
+      shell: |
+        echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list
+        curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+        apt-get update && apt-get install -y google-cloud-sdk google-cloud-sdk-gke-gcloud-auth-plugin
+      args:
+        creates: /usr/bin/gcloud
+      when: ansible_os_family == "Debian"
+
+    - name: Create runner user
+      user:
+        name: runner
+        shell: /bin/bash
+        create_home: yes
+        groups: docker
+        append: yes
+
+    - name: Create runner directory
+      file:
+        path: /opt/actions-runner
+        state: directory
+        owner: runner
+        group: runner
+        mode: '0755'
+
+    - name: Download GitHub Actions runner
+      get_url:
+        url: "https://github.com/actions/runner/releases/download/v{{ runner_version }}/actions-runner-linux-x64-{{ runner_version }}.tar.gz"
+        dest: /tmp/actions-runner.tar.gz
+
+    - name: Extract runner
+      unarchive:
+        src: /tmp/actions-runner.tar.gz
+        dest: /opt/actions-runner
+        owner: runner
+        group: runner
+        remote_src: yes
+
+    - name: Configure runner
+      command: |
+        ./config.sh --url https://github.com/{{ github_repo }} --token {{ github_token }} --unattended --replace
+      args:
+        chdir: /opt/actions-runner
+      become_user: runner
+      when: github_repo != "" and github_token != ""
+
+    - name: Install runner service
+      command: ./svc.sh install runner
+      args:
+        chdir: /opt/actions-runner
+      when: github_repo != "" and github_token != ""
+
+    - name: Start runner service
+      command: ./svc.sh start
+      args:
+        chdir: /opt/actions-runner
+      when: github_repo != "" and github_token != ""
+

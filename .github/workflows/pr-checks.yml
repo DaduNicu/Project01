@@ -1,0 +1,121 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: app/requirements.txt
+      
+      - name: Install dependencies
+        run: |
+          cd app
+          pip install -r requirements.txt
+      
+      - name: Lint with flake8
+        run: |
+          cd app
+          flake8 src/ tests/ --max-line-length=120
+      
+      - name: Run tests
+        run: |
+          cd app
+          pytest tests/ -v --cov=src
+
+  docker-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build Docker image
+        run: |
+          cd app
+          docker build -t app:test .
+      
+      - name: Run Trivy scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'app:test'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+      
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+      
+      - name: Terraform fmt
+        run: terraform fmt -check
+        continue-on-error: true
+      
+      - name: Terraform init
+        run: terraform init -backend=false
+      
+      - name: Terraform validate
+        run: terraform validate
+      
+      - name: tflint
+        uses: terraform-linters/setup-tflint@v4
+      
+      - name: Run tflint
+        run: |
+          tflint --init
+          tflint -f compact
+        continue-on-error: true
+
+  iac-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: infra/terraform
+          framework: terraform
+          output_format: cli
+          soft_fail: false
+          quiet: false
+
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: '3.13.0'
+      
+      - name: Helm lint
+        run: |
+          helm lint charts/app
+          helm lint charts/app -f charts/app/values.dev.yaml
+          helm lint charts/app -f charts/app/values.prod.yaml
+

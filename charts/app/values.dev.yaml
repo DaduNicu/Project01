@@ -1,0 +1,25 @@
+replicaCount: 2
+
+image:
+  tag: "main"
+
+ingress:
+  enabled: true
+  hosts:
+    - host: dev-app.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 5
+

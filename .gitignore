@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+kubeconfig
+*.key
+*.pem
+venv/
+.vscode/
+.DS_Store
+*.log
+

@@ -1,0 +1,202 @@
+name: Deploy
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deploy to environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_REGION: us-central1
+  GKE_CLUSTER: gcp-devops-challenge
+  REGISTRY: us-central1-docker.pkg.dev
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      sha_short: ${{ steps.sha.outputs.sha_short }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Get short SHA
+        id: sha
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      
+      - name: Auth to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      
+      - name: Setup Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+      
+      - name: Configure Docker for GCP
+        run: gcloud auth configure-docker ${{ env.REGISTRY }}
+      
+      - name: Build image
+        run: |
+          cd app
+          docker build -t ${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/gcp-devops-challenge/app:${{ steps.sha.outputs.sha_short }} \
+                       -t ${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/gcp-devops-challenge/app:main .
+      
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/gcp-devops-challenge/app:${{ steps.sha.outputs.sha_short }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+      
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v3
+        with:
+          name: sbom
+          path: sbom.spdx.json
+      
+      - name: Push image
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/gcp-devops-challenge/app:${{ steps.sha.outputs.sha_short }}
+          docker push ${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/gcp-devops-challenge/app:main
+
+  terraform-apply:
+    runs-on: ubuntu-latest
+    needs: build-push
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Auth to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+      
+      - name: Terraform init
+        run: terraform init
+      
+      - name: Terraform plan
+        run: terraform plan -var="project_id=${{ env.GCP_PROJECT_ID }}"
+      
+      - name: Terraform apply
+        run: terraform apply -auto-approve -var="project_id=${{ env.GCP_PROJECT_ID }}"
+
+  deploy-dev:
+    runs-on: ubuntu-latest
+    needs: [build-push, terraform-apply]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Auth to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GCP_REGION }}
+      
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: '3.13.0'
+      
+      - name: Deploy to dev
+        run: |
+          helm upgrade --install app charts/app \
+            -f charts/app/values.dev.yaml \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/gcp-devops-challenge/app \
+            --set image.tag=${{ needs.build-push.outputs.sha_short }} \
+            --namespace dev --create-namespace \
+            --wait --timeout 5m
+      
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/app -n dev --timeout=5m
+      
+      - name: Smoke test
+        run: |
+          kubectl wait --for=condition=ready pod -l app=app -n dev --timeout=60s
+          POD=$(kubectl get pod -l app=app -n dev -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward -n dev $POD 8080:8080 &
+          sleep 5
+          curl -f http://localhost:8080/healthz || exit 1
+
+  deploy-prod:
+    runs-on: ubuntu-latest
+    needs: [build-push, deploy-dev]
+    if: github.event.inputs.environment == 'prod' || github.ref == 'refs/heads/main'
+    environment: 
+      name: prod
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Auth to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GCP_REGION }}
+      
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: '3.13.0'
+      
+      - name: Get current revision
+        id: current
+        run: |
+          REVISION=$(helm history app -n prod -o json | jq -r '.[-1].revision // "0"')
+          echo "revision=$REVISION" >> $GITHUB_OUTPUT
+        continue-on-error: true
+      
+      - name: Deploy to prod
+        id: deploy
+        run: |
+          helm upgrade --install app charts/app \
+            -f charts/app/values.prod.yaml \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/gcp-devops-challenge/app \
+            --set image.tag=${{ needs.build-push.outputs.sha_short }} \
+            --namespace prod --create-namespace \
+            --wait --timeout 10m
+        continue-on-error: true
+      
+      - name: Check deployment health
+        id: health
+        if: steps.deploy.outcome == 'success'
+        run: |
+          kubectl rollout status deployment/app -n prod --timeout=5m
+          kubectl wait --for=condition=ready pod -l app=app -n prod --timeout=60s
+          POD=$(kubectl get pod -l app=app -n prod -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec -n prod $POD -- wget -q -O- http://localhost:8080/healthz || exit 1
+        continue-on-error: true
+      
+      - name: Rollback on failure
+        if: steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure'
+        run: |
+          echo "Deployment failed, rolling back..."
+          helm rollback app ${{ steps.current.outputs.revision }} -n prod --wait
+          kubectl rollout status deployment/app -n prod
+          exit 1
+
