@@ -1,3 +1,10 @@
+terraform {
+  backend "gcs" {
+    bucket = "gcp-devops-challenge-terraform-state"
+    prefix = "terraform/state"
+  }
+}
+
 # GCP Provider Configuration
 provider "google" {
   project = var.project_id
