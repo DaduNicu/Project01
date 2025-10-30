@@ -4,27 +4,50 @@ This directory contains the Terraform configuration for provisioning a GKE Autop
 
 ## Getting Started
 
+### 1. Enable Required APIs
+
 First, make sure the required Google Cloud APIs are enabled:
 
 ```bash
 gcloud services enable compute.googleapis.com \
   container.googleapis.com \
-  artifactregistry.googleapis.com
+  artifactregistry.googleapis.com \
+  cloudresourcemanager.googleapis.com
 ```
 
-Then configure your project:
+### 2. Set Up Remote State Storage
+
+Create a GCS bucket for Terraform state (enables CI/CD and team collaboration):
+
+```bash
+gsutil mb -p <your-project-id> -l us-central1 gs://gcp-devops-challenge-terraform-state
+```
+
+The backend is already configured in `main.tf` to use this bucket.
+
+### 3. Configure Your Project
 
 ```bash
 cp terraform.tfvars.example terraform.tfvars
 # Open terraform.tfvars and set your GCP project ID
 ```
 
-Now you're ready to deploy:
+### 4. Deploy Infrastructure
 
 ```bash
-terraform init
+terraform init    # Initialize Terraform and connect to GCS backend
 terraform plan    # Review what will be created
 terraform apply   # Build the infrastructure (takes ~10 minutes)
+```
+
+### 5. Grant CI/CD Permissions (for GitHub Actions)
+
+After infrastructure is created, grant the CI/CD service account necessary permissions:
+
+```bash
+gcloud projects add-iam-policy-binding <your-project-id> \
+  --member="serviceAccount:gcp-devops-challenge-cicd-sa@<your-project-id>.iam.gserviceaccount.com" \
+  --role="roles/editor"
 ```
 
 Once Terraform finishes, connect kubectl to your new cluster:
@@ -46,6 +69,24 @@ This Terraform configuration sets up:
   - One for GKE nodes (with logging and monitoring permissions)
   - One for CI/CD (with permissions to push images and deploy)
 - **IAM Bindings**: Least-privilege roles for all service accounts
+
+## Remote State Backend
+
+This configuration uses **Google Cloud Storage (GCS)** as the backend for Terraform state. This enables:
+- **Collaboration**: Multiple team members can work on the same infrastructure
+- **CI/CD Integration**: GitHub Actions can read/write state during deployments
+- **State Locking**: Prevents concurrent modifications
+- **Versioning**: GCS keeps historical versions of your state file
+
+The backend is configured in `main.tf`:
+```hcl
+terraform {
+  backend "gcs" {
+    bucket = "gcp-devops-challenge-terraform-state"
+    prefix = "terraform/state"
+  }
+}
+```
 
 ## Architecture Decisions
 
