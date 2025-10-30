@@ -14,11 +14,58 @@ This project implements multiple layers of security following DevSecOps best pra
 - Scope: Minimal required permissions
 
 **CI/CD SA** (`gcp-devops-challenge-cicd-sa`)
-- Permissions: artifactregistry.writer, container.developer
+- Permissions: artifactregistry.writer, container.developer, editor
 - Purpose: GitHub Actions pipeline
-- Scope: Deploy apps, push images only
+- Scope: Deploy apps, push images, manage infrastructure
+- **Authentication**: Service account JSON key stored in GitHub Secrets
 
-### Workload Identity
+### CI/CD Authentication Method
+
+**Current Approach: Service Account Key**
+
+GitHub Actions authenticates using a long-lived service account JSON key:
+- Stored as GitHub Secret (`GCP_SA_KEY`)
+- Used by `google-github-actions/auth@v2`
+- Simple to set up, works for proof-of-concept
+
+**Trade-offs:**
+- ❌ Long-lived credential (security risk if leaked)
+- ❌ Requires manual rotation
+- ✅ Simple setup (suitable for demo/challenge)
+- ✅ Works with all GitHub-hosted runners
+
+**Production Recommendation: Workload Identity Federation (OIDC)**
+
+For production, use OIDC-based Workload Identity Federation:
+```hcl
+# In Terraform
+resource "google_iam_workload_identity_pool" "github" {
+  workload_identity_pool_id = "github-actions"
+}
+
+resource "google_iam_workload_identity_pool_provider" "github" {
+  workload_identity_pool_provider_id = "github-provider"
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
+  
+  attribute_mapping = {
+    "google.subject"       = "assertion.sub"
+    "attribute.actor"      = "assertion.actor"
+    "attribute.repository" = "assertion.repository"
+  }
+  
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+```
+
+Benefits:
+- ✅ No long-lived keys (tokens expire in minutes)
+- ✅ Automatic rotation
+- ✅ Better audit trail
+- ✅ Scoped to specific repos/branches
+
+### Workload Identity (In-Cluster)
 
 Workload Identity enabled for pod-level authentication to GCP services.
 
